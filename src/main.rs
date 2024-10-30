@@ -15,7 +15,7 @@ use image::codecs::jpeg::JpegEncoder;
 use image::ImageEncoder;
 use size::Size;
 use std::cell::RefMut;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::{cell::RefCell, net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -48,8 +48,6 @@ async fn handle_request(
         .map(|a| a.parse::<u32>().ok())
         .collect();
 
-    println!("{:?}", parts);
-
     match (
         parts.get(0).copied().flatten(),
         parts.get(1).copied().flatten(),
@@ -65,9 +63,11 @@ async fn handle_request(
 
                         if data.is_none() {
                             *data = Some(
-                                // Dataset::open("/home/martin/OSM/build/final.tif")
-                                Dataset::open("/media/martin/14TB/ofmozaika/sk-wrapped.tif")
-                                    .expect("error opening dataset"),
+                                Dataset::open(
+                                    "/home/martin/14TB/ofmozaika/stred-warped-jxl.tif",
+                                    // "/home/martin/14TB/ofmozaika/stred-vychod-warped-jxl.vrt",
+                                )
+                                .expect("error opening dataset"),
                             );
                         }
 
@@ -81,18 +81,24 @@ async fn handle_request(
                                 width: 256f64,
                                 height: 256f64,
                             },
-                            false
+                            true,
                         );
 
-                        let mut img_data = Vec::<u8>::new();
+                        let encoder = webp::Encoder::from_rgba(&raster, 256, 256);
 
-                        let cursor = Cursor::new(&mut img_data);
+                        let webp = encoder.encode_lossless();
 
-                        JpegEncoder::new(cursor)
-                            .write_image(&raster, 256, 256, image::ExtendedColorType::Rgb8)
-                            .unwrap();
+                        Vec::from(&*webp)
 
-                        Bytes::from(img_data)
+                        // let mut img_data = Vec::<u8>::new();
+
+                        // let cursor = Cursor::new(&mut img_data);
+
+                        // JpegEncoder::new_with_quality(cursor, 95)
+                        //     .write_image(&raster, 256, 256, image::ExtendedColorType::Rgb8)
+                        //     .unwrap();
+
+                        // Bytes::from(img_data)
                     })
                 })
                 .await;
@@ -100,6 +106,7 @@ async fn handle_request(
             match result {
                 Ok(message) => Ok(Response::builder()
                     .status(StatusCode::OK)
+                    // .header("Content-Type", "image/webp")
                     .header("Content-Type", "image/jpeg")
                     .header("Access-Control-Allow-Origin", "*")
                     .body(Full::new(message.into()).map_err(|e| match e {}).boxed())
@@ -131,10 +138,16 @@ async fn handle_request(
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create a dedicated Tokio runtime for Dataset tasks.
     let dataset_runtime = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4) // Set the number of worker threads for the dedicated runtime.
-            .max_blocking_threads(24) // Set the maximum number of blocking threads.
+        tokio::runtime::Builder::new_current_thread()
+            .worker_threads(1)
+            .max_blocking_threads(4)
             .enable_all()
+            .on_thread_stop(|| {
+                println!("thread stopping");
+            })
+            .on_thread_start(|| {
+                println!("thread starting");
+            })
             .build()
             .unwrap(),
     );

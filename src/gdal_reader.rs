@@ -1,5 +1,5 @@
 use crate::{bbox::BBox, size::Size};
-use gdal::Dataset;
+use gdal::{raster::ResampleAlg, Dataset};
 
 pub fn read_rgba_from_gdal(
     dataset: &Dataset,
@@ -56,9 +56,25 @@ pub fn read_rgba_from_gdal(
     let hh = (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
 
     let mut data = vec![0u8; hh * ww];
+    // let mut mask_data = vec![0u8; hh * ww];
 
     for band_index in 0..band_count {
-        let band = dataset.rasterband(band_index as isize + 1).unwrap();
+        let band = dataset.rasterband(band_index + 1).unwrap();
+
+        // let mask_band = band.open_mask_band().unwrap();
+
+        // mask_band
+        //     .read_into_slice::<u8>(
+        //         (adj_window_x, adj_window_y),
+        //         (adj_source_width, adj_source_height),
+        //         (
+        //             (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
+        //             (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
+        //         ), // Resampled size
+        //         &mut mask_data,
+        //         Some(ResampleAlg::NearestNeighbour),
+        //     )
+        //     .unwrap();
 
         band.read_into_slice::<u8>(
             (adj_window_x, adj_window_y),
@@ -68,7 +84,7 @@ pub fn read_rgba_from_gdal(
                 (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
             ), // Resampled size
             &mut data,
-            Some(gdal::raster::ResampleAlg::Lanczos),
+            Some(ResampleAlg::NearestNeighbour),
         )
         .unwrap();
 
@@ -90,26 +106,29 @@ pub fn read_rgba_from_gdal(
 
                 let rgba_index = ((y + off_y) * w_scaled + (x + off_x)) * band_count + band_index;
 
-                rgba_data[rgba_index] = data[data_index];
+                rgba_data[rgba_index] =
+                //  if mask_data[data_index] != 0 {
+                    data[data_index];
+                // } else {
+                //     255
+                // };
             }
         }
     }
 
-    for i in (0..rgba_data.len()).step_by(3) {
-        let alpha = if with_alpha {
-            rgba_data[i + 3] as f32 / 255.0
-        } else {
-            1.0
-        };
+    // if with_alpha {
+    //     for i in (0..rgba_data.len()).step_by(3) {
+    //         let alpha = rgba_data[i + 3] as f32 / 255.0;
 
-        let r = (rgba_data[i + 0] as f32 * alpha) as u8;
-        let g = (rgba_data[i + 1] as f32 * alpha) as u8;
-        let b = (rgba_data[i + 2] as f32 * alpha) as u8;
+    //         let r = (rgba_data[i + 0] as f32 * alpha) as u8;
+    //         let g = (rgba_data[i + 1] as f32 * alpha) as u8;
+    //         let b = (rgba_data[i + 2] as f32 * alpha) as u8;
 
-        rgba_data[i + 0] = b;
-        rgba_data[i + 1] = g;
-        rgba_data[i + 2] = r;
-    }
+    //         rgba_data[i + 0] = r;
+    //         rgba_data[i + 1] = g;
+    //         rgba_data[i + 2] = b;
+    //     }
+    // }
 
     rgba_data
 }
