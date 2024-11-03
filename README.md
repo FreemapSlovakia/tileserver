@@ -9,12 +9,12 @@ Compile GDAL for JXL compression support. Use GDAL > 3.9.3 (which fixes lanczos 
 Download part of [Ortofotomozaia](https://www.geoportal.sk/sk/zbgis/ortofotomozaika/) SR you want to process from and extract it. Then build VRT:
 
 ```sh
-gdalbuildvrt -a_srs EPSG:8353; all.vrt *.tif
+gdalbuildvrt -a_srs EPSG:8353 all.vrt *.tif
 ```
 
 Next create cutline for alpha mask:
 
-1. create a tile index file `gdaltindex tmp.gpkg *.tif && ogr2ogr -f GPKG -t_srs EPSG:5514 index.gpkg tmp.gpkg && rm tmp.gpkg`
+1. create a tile index file `gdaltindex tmp.gpkg *.tif && ogr2ogr -f GPKG -t_srs EPSG:8353 index.gpkg tmp.gpkg && rm tmp.gpkg`
 1. download `lms_datum_snimkovania_#.zip` where # is 2 or 3
 1. dissolve `lms_datum_snimkovania`:
    ```sh
@@ -25,8 +25,8 @@ Next create cutline for alpha mask:
      -nln dissolved \
      -nlt POLYGON \
      -dialect sqlite \
-     -sql "SELECT ST_Simplify(ST_MakePolygon(ST_ExteriorRing(ST_Buffer(ST_Unio n(geometry), 0.00001, 1))), 0.1) AS geometry FROM lms_datum_snimkovania_2_ cyklus" \
-     -a_srs EPSG:5514
+     -sql "SELECT ST_Simplify(ST_MakePolygon(ST_ExteriorRing(ST_Buffer(ST_Union(geometry), 0.00001, 1))), 0.1) AS geometry FROM lms_datum_snimkovania_2_cyklus" \
+     -a_srs EPSG:8353
    ```
 1. dissolve the tile index
    ```sh
@@ -38,7 +38,7 @@ Next create cutline for alpha mask:
      -nlt POLYGON\
      -dialect sqlite \
      -sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
-     -a_srs EPSG:5514
+     -a_srs EPSG:8353
    ```
 1. create a vector mask
    ```sh
@@ -53,7 +53,7 @@ Next create cutline for alpha mask:
      " \
      -nln intersection \
      -nlt POLYGON \
-     -a_srs EPSG:5514
+     -a_srs EPSG:8353
    ```
 1. rasterize the mask
    ```sh
@@ -95,3 +95,62 @@ RES=$(calc_tr $ZOOM_LEVEL)
 ### Czech republic
 
 TODO
+
+```sh
+gdaltindex vychod-tileindex.gpkg -lyr_name index new/*.jpg
+
+ogr2ogr \
+  -f GPKG \
+  vychod-tileindex-dissolved.gpkg \
+  vychod-tileindex.gpkg \
+  -nln dissolved \
+  -nlt POLYGON \
+  -dialect sqlite \
+  -sql "SELECT ST_Union(geom) AS geometry FROM 'index'" \
+  -a_srs EPSG:5514
+
+ogr2ogr \
+  -f GPKG \
+  result.gpkg \
+  admin.gpkg \
+  -nln tiles \
+  -nlt POLYGON \
+  -dialect sqlite \
+  -sql "SELECT ST_Buffer(geom, 99.5, 16) AS geometry FROM administrative_units" \
+  -a_srs EPSG:5514
+
+ogr2ogr -f GPKG -update -append result.gpkg vychod-tileindex-dissolved.gpkg -nln dissolved
+
+ogr2ogr -f GPKG intersection.gpkg result.gpkg \
+  -dialect sqlite \
+  -sql "
+    SELECT ST_Intersection(a.geometry, b.geometry) AS geometry
+    FROM tiles a, dissolved b
+    WHERE ST_Intersects(a.geometry, b.geometry)
+  " \
+  -nln intersection \
+  -nlt POLYGON \
+  -a_srs EPSG:5514
+
+gdalbuildvrt vychod.vrt new/*.jpg
+
+gdal_rasterize \
+  -burn 0 \
+  -at -i \
+  -init 255 \
+  -tap \
+  $(gdalinfo -json vychod.vrt | jq -r '"-te \(.cornerCoordinates.upperLeft[0]) \(.cornerCoordinates.lowerRight[1]) \(.cornerCoordinates.lowerRight[0]) \(.cornerCoordinates.upperLeft[1]) -tr \(.geoTransform[1]) \(-.geoTransform[5])"') \
+  -ot Byte \
+  -of GTiff \
+  -co TILED=YES \
+  -co COMPRESS=DEFLATE \
+  -co BIGTIFF=YES \
+  intersection.gpkg \
+  vychod-alpha-mask.tif
+
+
+
+gdal_edit -unsetnodata mask...
+
+nice /usr/local/bin/gdalwarp -s_srs 'EPSG:5514' -t_srs 'EPSG:3857' -tr 0.14929107086948486475 0.14929107086948486475 -tap -r lanczos -of GTiff -co TILED=YES -co BIGTIFF=YES -co COMPRESS=JXL -co JXL_DISTANCE=1 -co JXL_LOSSLESS=NO -co NUM_THREADS=ALL_CPUS -wo NUM_THREADS=ALL_CPUS -multi tif/all.vrt zapad-warped-jxl.tif && nice /usr/local/bin/gdaladdo -r lanczos --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW JXL --config JXL_LOSSLESS_OVERVIEW NO --config JXL_DISTANCE_OVERVIEW 1 --config GDAL_NUM_THREADS ALL_CPUS --config NUM_THREADS_OVERVIEW ALL_CPUS -ro zapad-warped-jxl.tif
+```

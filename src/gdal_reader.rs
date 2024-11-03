@@ -1,14 +1,14 @@
 use crate::{bbox::BBox, size::Size};
+use anyhow::Result;
 use gdal::{raster::ResampleAlg, Dataset};
 
 pub fn read_rgba_from_gdal(
     dataset: &Dataset,
-    scale: f64,
     bbox: BBox<f64>,
     size: Size<f64>,
     with_alpha: bool,
-) -> Vec<u8> {
-    let [gt_x_off, gt_x_width, _, gt_y_off, _, gt_y_width] = dataset.geo_transform().unwrap();
+) -> Result<Vec<u8>> {
+    let [gt_x_off, gt_x_width, _, gt_y_off, _, gt_y_width] = dataset.geo_transform()?;
 
     let BBox {
         min_x,
@@ -25,12 +25,12 @@ pub fn read_rgba_from_gdal(
 
     let window_x = pixel_min_x;
     let window_y = pixel_min_y;
-    let source_width = (pixel_max_x - pixel_min_x) as usize;
-    let source_height = (pixel_max_y - pixel_min_y) as usize;
+    let source_width = pixel_max_x - pixel_min_x;
+    let source_height = pixel_max_y - pixel_min_y;
 
-    let w_scaled = (size.width as f64 * scale) as usize;
+    let w_scaled = size.width as usize;
 
-    let h_scaled = (size.height as f64 * scale) as usize;
+    let h_scaled = size.height as usize;
 
     let band_size = w_scaled * h_scaled;
 
@@ -44,13 +44,12 @@ pub fn read_rgba_from_gdal(
     let adj_window_x = window_x.max(0).min(raster_width as isize);
     let adj_window_y = window_y.max(0).min(raster_height as isize);
 
-    let adj_source_width = ((window_x + source_width as isize).min(raster_width as isize)
+    let adj_source_width: usize = ((window_x + source_width as isize).min(raster_width as isize)
         - adj_window_x)
         .max(0) as usize;
 
-    let adj_source_height = ((window_y + source_height as isize).min(raster_height as isize)
-        - adj_window_y)
-        .max(0) as usize;
+    let adj_source_height =
+        ((window_y + source_height).min(raster_height as isize) - adj_window_y).max(0) as usize;
 
     let ww = (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize;
     let hh = (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
@@ -59,9 +58,9 @@ pub fn read_rgba_from_gdal(
     // let mut mask_data = vec![0u8; hh * ww];
 
     for band_index in 0..band_count {
-        let band = dataset.rasterband(band_index + 1).unwrap();
+        let band = dataset.rasterband(band_index + 1)?;
 
-        // let mask_band = band.open_mask_band().unwrap();
+        // let mask_band = band.open_mask_band()?;
 
         // mask_band
         //     .read_into_slice::<u8>(
@@ -74,7 +73,7 @@ pub fn read_rgba_from_gdal(
         //         &mut mask_data,
         //         Some(ResampleAlg::NearestNeighbour),
         //     )
-        //     .unwrap();
+        //     ?;
 
         band.read_into_slice::<u8>(
             (adj_window_x, adj_window_y),
@@ -85,8 +84,7 @@ pub fn read_rgba_from_gdal(
             ), // Resampled size
             &mut data,
             Some(ResampleAlg::NearestNeighbour),
-        )
-        .unwrap();
+        )?;
 
         for y in 0..w_scaled.min(hh) {
             for x in 0..h_scaled.min(ww) {
@@ -130,5 +128,5 @@ pub fn read_rgba_from_gdal(
     //     }
     // }
 
-    rgba_data
+    Ok(rgba_data)
 }

@@ -1,6 +1,6 @@
 use std::ops::Sub;
 
-#[derive(PartialEq, Copy, Clone)]
+#[derive(PartialEq, Eq, Copy, Clone)]
 pub struct BBox<T>
 where
     T: Sub<Output = T> + PartialOrd + Copy,
