@@ -2,7 +2,7 @@
 
 ## Data preparation
 
-Compile GDAL for JXL compression support. Use GDAL > 3.9.3 (which fixes lanczos resampling artifacts).
+Compile GDAL for JXL compression support. Use GDAL 3.10 or later.
 
 ### Slovakia
 

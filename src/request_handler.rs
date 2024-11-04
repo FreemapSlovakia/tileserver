@@ -67,24 +67,24 @@ pub async fn handle_request(
                             )?
                         };
 
-                        // let encoder = webp::Encoder::from_rgba(&raster, 256, 256);
+                        let encoder = webp::Encoder::from_rgba(&raster, 256, 256);
 
-                        // let webp = encoder.encode_lossless();
+                        let webp = encoder.encode_lossless();
 
-                        // Vec::from(&*webp)
+                        anyhow::Ok(Bytes::from(Vec::from(&*webp)))
 
-                        let mut img_data = Vec::<u8>::new();
+                        // let mut img_data = Vec::<u8>::new();
 
-                        let cursor = Cursor::new(&mut img_data);
+                        // let cursor = Cursor::new(&mut img_data);
 
-                        JpegEncoder::new_with_quality(cursor, 95).write_image(
-                            &raster,
-                            256,
-                            256,
-                            image::ExtendedColorType::Rgb8,
-                        )?;
+                        // JpegEncoder::new_with_quality(cursor, 95).write_image(
+                        //     &raster,
+                        //     256,
+                        //     256,
+                        //     image::ExtendedColorType::Rgb8,
+                        // )?;
 
-                        anyhow::Ok(Bytes::from(img_data))
+                        // anyhow::Ok(Bytes::from(img_data))
                     })
                 })
                 .await;
