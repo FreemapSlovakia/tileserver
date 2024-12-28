@@ -1,6 +1,7 @@
-use crate::gdal_reader::read_rgba_from_gdal;
+use crate::gdal_reader::{read_rgba_from_gdal, Background};
 use crate::size::Size;
 use crate::xyz::tile_bounds_to_epsg3857;
+use anyhow::bail;
 use gdal::Dataset;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{
@@ -8,6 +9,7 @@ use hyper::{
     Method, Request, Response, StatusCode,
 };
 use image::{codecs::jpeg::JpegEncoder, ImageEncoder};
+use std::path::Path;
 use std::{cell::RefCell, io::Cursor, sync::Arc};
 use tokio::runtime::Runtime;
 
@@ -15,10 +17,28 @@ thread_local! {
     static THREAD_LOCAL_DATA: RefCell<Option<Dataset>> = const {RefCell::new(None)};
 }
 
+enum Ext {
+    Jpeg,
+    // Png,
+    Webp,
+}
+
+impl TryFrom<&str> for Ext {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "jpg" | "jpeg" => Ok(Self::Jpeg),
+            "webp" => Ok(Self::Webp),
+            _ => Err(format!("unsupported extension {value}")),
+        }
+    }
+}
+
 pub async fn handle_request(
     pool: Arc<Runtime>,
     req: Request<Incoming>,
-    path: Arc<String>,
+    raster_path: &'static Path,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>, hyper::http::Error> {
     if req.method() != Method::GET {
         return Response::builder()
@@ -30,11 +50,19 @@ pub async fn handle_request(
             );
     }
 
-    let parts: Vec<_> = req
-        .uri()
-        .path()
-        .split('/')
-        .skip(1)
+    let path = req.uri().path();
+
+    let parts: Vec<_> = path.splitn(2, '.').collect();
+
+    let ext: Option<Ext> = parts.get(1).map(|&x| x.try_into()).transpose().unwrap(); // TODO unwarp
+
+    let parts: Vec<_> = parts
+        .get(0)
+        .copied()
+        .unwrap_or_default()
+        .get(1..)
+        .unwrap_or_default()
+        .splitn(3, '/')
         .map(|a| a.parse::<u32>().ok())
         .collect();
 
@@ -51,9 +79,9 @@ pub async fn handle_request(
                     THREAD_LOCAL_DATA.with(|data| {
                         let mut data = data.borrow_mut();
 
-                        let raster = {
+                        let (has_alpha, raster) = {
                             let ds = data.get_or_insert_with(|| {
-                                Dataset::open(path.to_string()).expect("error opening dataset")
+                                Dataset::open(raster_path).expect("error opening dataset")
                             });
 
                             read_rgba_from_gdal(
@@ -63,28 +91,38 @@ pub async fn handle_request(
                                     width: 256f64,
                                     height: 256f64,
                                 },
-                                true,
+                                Background::Rgb(255, 0, 0), // TODO or alpha by query or image format alpha support
                             )?
                         };
 
-                        let encoder = webp::Encoder::from_rgba(&raster, 256, 256);
+                        match ext {
+                            Some(Ext::Webp) => {
+                                let encoder = if has_alpha {
+                                    webp::Encoder::from_rgba(&raster, 256, 256)
+                                } else {
+                                    webp::Encoder::from_rgb(&raster, 256, 256)
+                                };
 
-                        let webp = encoder.encode_lossless();
+                                let webp = encoder.encode_lossless(); // TODO configurable quality
 
-                        anyhow::Ok(Bytes::from(Vec::from(&*webp)))
+                                anyhow::Ok(Bytes::from(Vec::from(&*webp)))
+                            }
+                            Some(Ext::Jpeg) => {
+                                let mut img_data = Vec::<u8>::new();
 
-                        // let mut img_data = Vec::<u8>::new();
+                                let cursor = Cursor::new(&mut img_data);
 
-                        // let cursor = Cursor::new(&mut img_data);
+                                JpegEncoder::new_with_quality(cursor, 95).write_image(
+                                    &raster,
+                                    256,
+                                    256,
+                                    image::ExtendedColorType::Rgb8,
+                                )?;
 
-                        // JpegEncoder::new_with_quality(cursor, 95).write_image(
-                        //     &raster,
-                        //     256,
-                        //     256,
-                        //     image::ExtendedColorType::Rgb8,
-                        // )?;
-
-                        // anyhow::Ok(Bytes::from(img_data))
+                                anyhow::Ok(Bytes::from(img_data))
+                            }
+                            None => bail!("missing extension"),
+                        }
                     })
                 })
                 .await;
@@ -94,7 +132,9 @@ pub async fn handle_request(
                 .and_then(|inner_result| inner_result);
 
             result.map_or_else(
-                |_| {
+                |e| {
+                    eprintln!("Error: {e}");
+
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(

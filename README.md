@@ -74,7 +74,7 @@ Next create cutline for alpha mask:
 Finally create the warped and masked tif.
 
 ```sh
-ZOOM_LEVEL=20 # for "2 cyklus" use  19
+ZOOM_LEVEL=19 # for "2 cyklus" use  19
 
 calc_tr() {
     zoom_level=$1
@@ -85,11 +85,11 @@ CT='+proj=pipeline +step +inv +proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +
 
 RES=$(calc_tr $ZOOM_LEVEL)
 
-/usr/local/bin/gdalwarp -s_srs 'EPSG:8353' -t_srs 'EPSG:3857' -ct $CT -tr $RES $RES -tap -r lanczos -of GTiff -co TILED=YES -co BIGTIFF=YES -co COMPRESS=JXL -co JXL_DISTANCE=1 -co JXL_LOSSLESS=NO -co NUM_THREADS=ALL_CPUS -wo NUM_THREADS=ALL_CPUS -multi Ortofoto_2021_stred_jtsk_rgb/all.vrt stred-warped-jxl.tif
+gdalwarp -s_srs 'EPSG:8353' -t_srs 'EPSG:3857' -ct "$CT" -tr $RES $RES -tap -r lanczos -of GTiff -co TILED=YES -co BIGTIFF=YES -co COMPRESS=JXL -co JXL_DISTANCE=1 -co JXL_LOSSLESS=NO -co NUM_THREADS=ALL_CPUS -wo NUM_THREADS=ALL_CPUS -multi Ortofoto_2021_stred_jtsk_rgb/all.vrt stred-warped-jxl.tif
 ```
 
 ```sh
-/usr/local/bin/gdaladdo -r lanczos --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW JXL --config JXL_LOSSLESS_OVERVIEW NO --config JXL_DISTANCE_OVERVIEW 1 --config GDAL_NUM_THREADS ALL_CPUS --config NUM_THREADS_OVERVIEW ALL_CPUS -ro stred-warped-jxl.tif
+gdaladdo -r lanczos --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW JXL --config JXL_LOSSLESS_OVERVIEW NO --config JXL_DISTANCE_OVERVIEW 1 --config GDAL_NUM_THREADS ALL_CPUS --config NUM_THREADS_OVERVIEW ALL_CPUS -ro stred-warped-jxl.tif
 ```
 
 ### Czech republic
@@ -152,5 +152,5 @@ gdal_rasterize \
 
 gdal_edit -unsetnodata mask...
 
-nice /usr/local/bin/gdalwarp -s_srs 'EPSG:5514' -t_srs 'EPSG:3857' -tr 0.14929107086948486475 0.14929107086948486475 -tap -r lanczos -of GTiff -co TILED=YES -co BIGTIFF=YES -co COMPRESS=JXL -co JXL_DISTANCE=1 -co JXL_LOSSLESS=NO -co NUM_THREADS=ALL_CPUS -wo NUM_THREADS=ALL_CPUS -multi tif/all.vrt zapad-warped-jxl.tif && nice /usr/local/bin/gdaladdo -r lanczos --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW JXL --config JXL_LOSSLESS_OVERVIEW NO --config JXL_DISTANCE_OVERVIEW 1 --config GDAL_NUM_THREADS ALL_CPUS --config NUM_THREADS_OVERVIEW ALL_CPUS -ro zapad-warped-jxl.tif
+nice gdalwarp -s_srs 'EPSG:5514' -t_srs 'EPSG:3857' -tr 0.14929107086948486475 0.14929107086948486475 -tap -r lanczos -of GTiff -co TILED=YES -co BIGTIFF=YES -co COMPRESS=JXL -co JXL_DISTANCE=1 -co JXL_LOSSLESS=NO -co NUM_THREADS=ALL_CPUS -wo NUM_THREADS=ALL_CPUS -multi tif/all.vrt zapad-warped-jxl.tif && nice gdaladdo -r lanczos --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW JXL --config JXL_LOSSLESS_OVERVIEW NO --config JXL_DISTANCE_OVERVIEW 1 --config GDAL_NUM_THREADS ALL_CPUS --config NUM_THREADS_OVERVIEW ALL_CPUS -ro zapad-warped-jxl.tif
 ```

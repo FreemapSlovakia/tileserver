@@ -1,13 +1,18 @@
 use crate::{bbox::BBox, size::Size};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use gdal::{raster::ResampleAlg, Dataset};
+
+pub enum Background {
+    Alpha,
+    Rgb(u8, u8, u8),
+}
 
 pub fn read_rgba_from_gdal(
     dataset: &Dataset,
-    bbox: BBox<f64>,
+    result_bbox: BBox<f64>,
     size: Size<f64>,
-    with_alpha: bool,
-) -> Result<Vec<u8>> {
+    background: Background,
+) -> Result<(bool, Vec<u8>)> {
     let [gt_x_off, gt_x_width, _, gt_y_off, _, gt_y_width] = dataset.geo_transform()?;
 
     let BBox {
@@ -15,7 +20,7 @@ pub fn read_rgba_from_gdal(
         min_y,
         max_x,
         max_y,
-    } = bbox;
+    } = result_bbox;
 
     // Convert geographic coordinates (min_x, min_y, max_x, max_y) to pixel coordinates
     let pixel_min_x = ((min_x - gt_x_off) / gt_x_width).round() as isize;
@@ -34,9 +39,19 @@ pub fn read_rgba_from_gdal(
 
     let band_size = w_scaled * h_scaled;
 
-    let band_count = if with_alpha { 4 } else { 3 };
+    let input_count = dataset.raster_count();
 
-    let mut rgba_data = vec![0u8; band_size * band_count];
+    if !matches!(input_count, 3..=4) {
+        bail!("input is not rgb or rgba");
+    }
+
+    // TODO consider mask
+
+    let result_count = if input_count == 4 && matches!(background, Background::Alpha) {
+        4
+    } else {
+        3
+    };
 
     let (raster_width, raster_height) = dataset.raster_size();
 
@@ -44,9 +59,8 @@ pub fn read_rgba_from_gdal(
     let adj_window_x = window_x.max(0).min(raster_width as isize);
     let adj_window_y = window_y.max(0).min(raster_height as isize);
 
-    let adj_source_width: usize = ((window_x + source_width as isize).min(raster_width as isize)
-        - adj_window_x)
-        .max(0) as usize;
+    let adj_source_width: usize =
+        ((window_x + source_width).min(raster_width as isize) - adj_window_x).max(0) as usize;
 
     let adj_source_height =
         ((window_y + source_height).min(raster_height as isize) - adj_window_y).max(0) as usize;
@@ -54,26 +68,64 @@ pub fn read_rgba_from_gdal(
     let ww = (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize;
     let hh = (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
 
-    let mut data = vec![0u8; hh * ww];
-    // let mut mask_data = vec![0u8; hh * ww];
+    let mut source_band = vec![0u8; hh * ww];
 
-    for band_index in 0..band_count {
+    let mut result_data = match (background, result_count) {
+        (Background::Rgb(r, g, b), 4) => vec![r, g, b, 255]
+            .into_iter()
+            .cycle()
+            .take(band_size * result_count)
+            .collect::<Vec<u8>>(),
+
+        (Background::Rgb(r, g, b), 3) => vec![r, g, b]
+            .into_iter()
+            .cycle()
+            .take(band_size * result_count)
+            .collect::<Vec<u8>>(),
+
+        _ => vec![0u8; band_size * result_count],
+    };
+
+    let alpha_band = if result_count == 4 {
+        Some({
+            let mut source_band = vec![0u8; hh * ww];
+
+            dataset.rasterband(4)?.read_into_slice::<u8>(
+                (adj_window_x, adj_window_y),
+                (adj_source_width, adj_source_height),
+                (
+                    (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
+                    (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
+                ),
+                &mut source_band,
+                Some(ResampleAlg::NearestNeighbour),
+            )?;
+
+            source_band
+        })
+    } else {
+        None
+    };
+
+    for band_index in 0..result_count {
         let band = dataset.rasterband(band_index + 1)?;
 
-        // let mask_band = band.open_mask_band()?;
+        // band.mask_flags()?.
 
-        // mask_band
-        //     .read_into_slice::<u8>(
-        //         (adj_window_x, adj_window_y),
-        //         (adj_source_width, adj_source_height),
-        //         (
-        //             (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
-        //             (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
-        //         ), // Resampled size
-        //         &mut mask_data,
-        //         Some(ResampleAlg::NearestNeighbour),
-        //     )
-        //     ?;
+        let mask_band = band.open_mask_band()?;
+
+        let mut mask_data = vec![0u8; hh * ww];
+
+        mask_band.read_into_slice::<u8>(
+            (adj_window_x, adj_window_y),
+            (adj_source_width, adj_source_height),
+            (
+                (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
+                (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
+            ),
+            &mut mask_data,
+            Some(ResampleAlg::NearestNeighbour),
+        )?;
 
         band.read_into_slice::<u8>(
             (adj_window_x, adj_window_y),
@@ -81,8 +133,8 @@ pub fn read_rgba_from_gdal(
             (
                 (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
                 (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
-            ), // Resampled size
-            &mut data,
+            ),
+            &mut source_band,
             Some(ResampleAlg::NearestNeighbour),
         )?;
 
@@ -102,31 +154,39 @@ pub fn read_rgba_from_gdal(
                     w_scaled - ww
                 };
 
-                let rgba_index = ((y + off_y) * w_scaled + (x + off_x)) * band_count + band_index;
+                if mask_data[data_index] != 0 {
+                    let result_index =
+                        ((y + off_y) * w_scaled + (x + off_x)) * result_count + band_index;
 
-                rgba_data[rgba_index] =
-                //  if mask_data[data_index] != 0 {
-                    data[data_index];
-                // } else {
-                //     255
-                // };
+                    result_data[result_index] = alpha_band.as_ref().map_or_else(
+                        || source_band[data_index],
+                        |alpha_band| {
+                            let alpha = u16::from(alpha_band[data_index]);
+
+                            ((source_band[data_index] as u16 * alpha
+                                + result_data[result_index] as u16 * (255 - alpha))
+                                / 255) as u8
+                        },
+                    )
+                }
             }
         }
     }
 
-    // if with_alpha {
-    //     for i in (0..rgba_data.len()).step_by(3) {
-    //         let alpha = rgba_data[i + 3] as f32 / 255.0;
+    // premultiply
+    if result_count == 4 {
+        for i in (0..result_data.len()).step_by(3) {
+            let alpha = result_data[i + 3] as f32 / 255.0;
 
-    //         let r = (rgba_data[i + 0] as f32 * alpha) as u8;
-    //         let g = (rgba_data[i + 1] as f32 * alpha) as u8;
-    //         let b = (rgba_data[i + 2] as f32 * alpha) as u8;
+            let r = (f32::from(result_data[i + 0]) * alpha) as u8;
+            let g = (f32::from(result_data[i + 1]) * alpha) as u8;
+            let b = (f32::from(result_data[i + 2]) * alpha) as u8;
 
-    //         rgba_data[i + 0] = r;
-    //         rgba_data[i + 1] = g;
-    //         rgba_data[i + 2] = b;
-    //     }
-    // }
+            result_data[i + 0] = r;
+            result_data[i + 1] = g;
+            result_data[i + 2] = b;
+        }
+    }
 
-    Ok(rgba_data)
+    Ok((result_count == 4, result_data))
 }

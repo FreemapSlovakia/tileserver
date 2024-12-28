@@ -9,6 +9,7 @@ use clap::Parser;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use request_handler::handle_request;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
@@ -22,7 +23,7 @@ struct Args {
 
     /// Raster file
     #[arg(short, long)]
-    raster_file: String,
+    raster_file: PathBuf,
 }
 
 #[tokio::main]
@@ -49,7 +50,9 @@ async fn main() -> Result<()> {
         |s| s.parse(),
     )?;
 
-    let raster_file = Arc::new(args.raster_file);
+    let raster_file: &Path = Box::leak(args.raster_file.into_boxed_path());
+
+    // let raster_file = Arc::new(&args.raster_file);
 
     let listener = TcpListener::bind(addr).await?;
 
@@ -60,12 +63,8 @@ async fn main() -> Result<()> {
 
         let pool = dataset_runtime.clone();
 
-        let raster_file = raster_file.clone();
-
         let sfn = service_fn(move |req| {
             let pool = pool.clone();
-
-            let raster_file = raster_file.clone();
 
             async move { handle_request(pool, req, raster_file).await }
         });
