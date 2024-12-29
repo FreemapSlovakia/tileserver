@@ -13,3 +13,4 @@ http-body-util = "0.1.2"
 webp = "0.3.0"
 clap = { version = "4.5.20", features = ["derive"] }
 anyhow = "1.0.92"
+thiserror = "2.0.9"

@@ -1,10 +1,18 @@
 use crate::{bbox::BBox, size::Size};
-use anyhow::{bail, Result};
-use gdal::{raster::ResampleAlg, Dataset};
+use gdal::{errors::GdalError, raster::ResampleAlg, Dataset};
+use thiserror::Error;
 
 pub enum Background {
     Alpha,
     Rgb(u8, u8, u8),
+}
+
+#[derive(Error, Debug)]
+pub enum ReadError {
+    #[error("band count error")]
+    BandCountError,
+    #[error("gdal error")]
+    GdalError(#[from] GdalError),
 }
 
 pub fn read_rgba_from_gdal(
@@ -12,7 +20,13 @@ pub fn read_rgba_from_gdal(
     result_bbox: BBox<f64>,
     size: Size<f64>,
     background: Background,
-) -> Result<(bool, Vec<u8>)> {
+) -> Result<(bool, Vec<u8>), ReadError> {
+    let input_count = dataset.raster_count();
+
+    if !matches!(input_count, 3..=4) {
+        return Err(ReadError::BandCountError);
+    }
+
     let [gt_x_off, gt_x_width, _, gt_y_off, _, gt_y_width] = dataset.geo_transform()?;
 
     let BBox {
@@ -39,12 +53,6 @@ pub fn read_rgba_from_gdal(
 
     let band_size = w_scaled * h_scaled;
 
-    let input_count = dataset.raster_count();
-
-    if !matches!(input_count, 3..=4) {
-        bail!("input is not rgb or rgba");
-    }
-
     // TODO consider mask
 
     let result_count = if input_count == 4 && matches!(background, Background::Alpha) {
@@ -57,6 +65,7 @@ pub fn read_rgba_from_gdal(
 
     // Adjust the window to fit within the raster bounds
     let adj_window_x = window_x.max(0).min(raster_width as isize);
+
     let adj_window_y = window_y.max(0).min(raster_height as isize);
 
     let adj_source_width: usize =
@@ -66,7 +75,28 @@ pub fn read_rgba_from_gdal(
         ((window_y + source_height).min(raster_height as isize) - adj_window_y).max(0) as usize;
 
     let ww = (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize;
+
     let hh = (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
+
+    let window = (adj_window_x, adj_window_y);
+
+    let window_size = (adj_source_width, adj_source_height);
+
+    let size = (ww, hh);
+
+    let off_y = if window_y == adj_window_y {
+        0
+    } else {
+        h_scaled - hh
+    };
+
+    let off_x = if window_x == adj_window_x {
+        0
+    } else {
+        w_scaled - ww
+    };
+
+    println!("{off_y} = {h_scaled} - {hh}");
 
     let mut source_band = vec![0u8; hh * ww];
 
@@ -91,12 +121,9 @@ pub fn read_rgba_from_gdal(
             let mut source_band = vec![0u8; hh * ww];
 
             dataset.rasterband(4)?.read_into_slice::<u8>(
-                (adj_window_x, adj_window_y),
-                (adj_source_width, adj_source_height),
-                (
-                    (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
-                    (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
-                ),
+                window,
+                window_size,
+                size,
                 &mut source_band,
                 Some(ResampleAlg::NearestNeighbour),
             )?;
@@ -117,23 +144,17 @@ pub fn read_rgba_from_gdal(
         let mut mask_data = vec![0u8; hh * ww];
 
         mask_band.read_into_slice::<u8>(
-            (adj_window_x, adj_window_y),
-            (adj_source_width, adj_source_height),
-            (
-                (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
-                (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
-            ),
+            window,
+            window_size,
+            size,
             &mut mask_data,
             Some(ResampleAlg::NearestNeighbour),
         )?;
 
         band.read_into_slice::<u8>(
-            (adj_window_x, adj_window_y),
-            (adj_source_width, adj_source_height),
-            (
-                (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize,
-                (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize,
-            ),
+            window,
+            window_size,
+            size,
             &mut source_band,
             Some(ResampleAlg::NearestNeighbour),
         )?;
@@ -141,18 +162,6 @@ pub fn read_rgba_from_gdal(
         for y in 0..w_scaled.min(hh) {
             for x in 0..h_scaled.min(ww) {
                 let data_index = y * ww + x;
-
-                let off_y = if window_y == adj_window_y {
-                    0
-                } else {
-                    h_scaled - hh
-                };
-
-                let off_x = if window_x == adj_window_x {
-                    0
-                } else {
-                    w_scaled - ww
-                };
 
                 if mask_data[data_index] != 0 {
                     let result_index =

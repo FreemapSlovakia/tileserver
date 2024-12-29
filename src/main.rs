@@ -9,9 +9,12 @@ use clap::Parser;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use request_handler::handle_request;
-use std::path::{Path, PathBuf};
-use std::thread;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread,
+};
 use tokio::net::TcpListener;
 
 #[derive(Parser, Debug)]

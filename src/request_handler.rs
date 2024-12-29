@@ -1,17 +1,19 @@
-use crate::gdal_reader::{read_rgba_from_gdal, Background};
+use crate::gdal_reader::{read_rgba_from_gdal, Background, ReadError};
 use crate::size::Size;
 use crate::xyz::tile_bounds_to_epsg3857;
-use anyhow::bail;
 use gdal::Dataset;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{
     body::{Bytes, Incoming},
     Method, Request, Response, StatusCode,
 };
+use image::ImageError;
 use image::{codecs::jpeg::JpegEncoder, ImageEncoder};
 use std::path::Path;
 use std::{cell::RefCell, io::Cursor, sync::Arc};
+use thiserror::Error;
 use tokio::runtime::Runtime;
+use tokio::task::JoinError;
 
 thread_local! {
     static THREAD_LOCAL_DATA: RefCell<Option<Dataset>> = const {RefCell::new(None)};
@@ -35,6 +37,18 @@ impl TryFrom<&str> for Ext {
     }
 }
 
+#[derive(Error, Debug)]
+enum FooErr {
+    #[error("join error")]
+    JoinError(#[from] JoinError),
+    #[error("not acceptable")]
+    NotAcceptable,
+    #[error("gdal read error")]
+    GdalReadError(#[from] ReadError),
+    #[error("image encoding error")]
+    ImageEncodingError(#[from] ImageError),
+}
+
 pub async fn handle_request(
     pool: Arc<Runtime>,
     req: Request<Incoming>,
@@ -54,7 +68,15 @@ pub async fn handle_request(
 
     let parts: Vec<_> = path.splitn(2, '.').collect();
 
-    let ext: Option<Ext> = parts.get(1).map(|&x| x.try_into()).transpose().unwrap(); // TODO unwarp
+    let ext: Result<Option<Ext>, _> = parts.get(1).map(|&x| x.try_into()).transpose();
+
+    let Ok(ext) = ext else {
+        return Response::builder().status(StatusCode::NOT_FOUND).body(
+            Full::new("Not found".into())
+                .map_err(|e| match e {})
+                .boxed(),
+        );
+    };
 
     let parts: Vec<_> = parts
         .get(0)
@@ -74,74 +96,79 @@ pub async fn handle_request(
         (Some(zoom), Some(x), Some(y)) if parts.len() == 3 => {
             let bbox = tile_bounds_to_epsg3857(x, y, zoom, 256);
 
-            let result = pool
-                .spawn_blocking(move || {
-                    THREAD_LOCAL_DATA.with(|data| {
-                        let mut data = data.borrow_mut();
+            pool.spawn_blocking(move || {
+                THREAD_LOCAL_DATA.with(|data| {
+                    let mut data = data.borrow_mut();
 
-                        let (has_alpha, raster) = {
-                            let ds = data.get_or_insert_with(|| {
-                                Dataset::open(raster_path).expect("error opening dataset")
-                            });
+                    let (has_alpha, raster) = {
+                        let ds = data.get_or_insert_with(|| {
+                            Dataset::open(raster_path).expect("error opening dataset")
+                        });
 
-                            read_rgba_from_gdal(
-                                ds,
-                                bbox,
-                                Size {
-                                    width: 256f64,
-                                    height: 256f64,
-                                },
-                                Background::Rgb(255, 0, 0), // TODO or alpha by query or image format alpha support
-                            )?
-                        };
+                        read_rgba_from_gdal(
+                            ds,
+                            bbox,
+                            Size {
+                                width: 256f64,
+                                height: 256f64,
+                            },
+                            Background::Rgb(255, 0, 0), // TODO or alpha by query or image format alpha support
+                        )?
+                    };
 
-                        match ext {
-                            Some(Ext::Webp) => {
-                                let encoder = if has_alpha {
-                                    webp::Encoder::from_rgba(&raster, 256, 256)
-                                } else {
-                                    webp::Encoder::from_rgb(&raster, 256, 256)
-                                };
+                    match ext {
+                        Some(Ext::Webp) => {
+                            let encoder = if has_alpha {
+                                webp::Encoder::from_rgba(&raster, 256, 256)
+                            } else {
+                                webp::Encoder::from_rgb(&raster, 256, 256)
+                            };
 
-                                let webp = encoder.encode_lossless(); // TODO configurable quality
+                            let webp = encoder.encode_lossless(); // TODO configurable quality
 
-                                anyhow::Ok(Bytes::from(Vec::from(&*webp)))
-                            }
-                            Some(Ext::Jpeg) => {
-                                let mut img_data = Vec::<u8>::new();
-
-                                let cursor = Cursor::new(&mut img_data);
-
-                                JpegEncoder::new_with_quality(cursor, 95).write_image(
-                                    &raster,
-                                    256,
-                                    256,
-                                    image::ExtendedColorType::Rgb8,
-                                )?;
-
-                                anyhow::Ok(Bytes::from(img_data))
-                            }
-                            None => bail!("missing extension"),
+                            Ok(Bytes::from(Vec::from(&*webp)))
                         }
-                    })
+                        Some(Ext::Jpeg) => {
+                            let mut img_data = Vec::<u8>::new();
+
+                            let cursor = Cursor::new(&mut img_data);
+
+                            JpegEncoder::new_with_quality(cursor, 95).write_image(
+                                &raster,
+                                256,
+                                256,
+                                image::ExtendedColorType::Rgb8,
+                            )?;
+
+                            Ok(Bytes::from(img_data))
+                        }
+                        None => return Err(FooErr::NotAcceptable),
+                    }
                 })
-                .await;
-
-            let result = result
-                .map_err(anyhow::Error::new)
-                .and_then(|inner_result| inner_result);
-
-            result.map_or_else(
-                |e| {
-                    eprintln!("Error: {e}");
-
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(
-                            Full::new("Internal Server Error".into())
+            })
+            .await
+            .map_err(FooErr::JoinError)
+            .and_then(|inner_result| inner_result)
+            .map_or_else(
+                |e| match e {
+                    FooErr::NotAcceptable => {
+                        Response::builder().status(StatusCode::NOT_ACCEPTABLE).body(
+                            Full::new("Not acceptable".into())
                                 .map_err(|e| match e {})
                                 .boxed(),
                         )
+                    }
+                    _ => {
+                        eprintln!("Error: {e}");
+
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(
+                                Full::new("Internal Server Error".into())
+                                    .map_err(|e| match e {})
+                                    .boxed(),
+                            )
+                    }
                 },
                 |message| {
                     Response::builder()
@@ -153,8 +180,8 @@ pub async fn handle_request(
                 },
             )
         }
-        _ => Response::builder().status(StatusCode::BAD_REQUEST).body(
-            Full::new("Bad request".into())
+        _ => Response::builder().status(StatusCode::NOT_FOUND).body(
+            Full::new("Not found".into())
                 .map_err(|e| match e {})
                 .boxed(),
         ),
