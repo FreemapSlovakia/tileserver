@@ -37,7 +37,7 @@ impl TryFrom<&str> for Ext {
 }
 
 #[derive(Error, Debug)]
-enum FooErr {
+enum ProcessingError {
     #[error("join error")]
     JoinError(#[from] JoinError),
     #[error("not acceptable")]
@@ -122,7 +122,7 @@ pub async fn handle_request(
 
                             let webp = encoder.encode_lossless(); // TODO configurable quality
 
-                            Ok(Bytes::from(Vec::from(&*webp)))
+                            Ok((Ext::Webp, Bytes::from(Vec::from(&*webp))))
                         }
                         Some(Ext::Jpeg) => {
                             let mut img_data = Vec::<u8>::new();
@@ -136,18 +136,18 @@ pub async fn handle_request(
                                 image::ExtendedColorType::Rgb8,
                             )?;
 
-                            Ok(Bytes::from(img_data))
+                            Ok((Ext::Jpeg, Bytes::from(img_data)))
                         }
-                        None => Err(FooErr::NotAcceptable),
+                        None => Err(ProcessingError::NotAcceptable),
                     }
                 })
             })
             .await
-            .map_err(FooErr::JoinError)
+            .map_err(ProcessingError::JoinError)
             .and_then(|inner_result| inner_result)
             .map_or_else(
                 |e| match e {
-                    FooErr::NotAcceptable => {
+                    ProcessingError::NotAcceptable => {
                         Response::builder().status(StatusCode::NOT_ACCEPTABLE).body(
                             Full::new("Not acceptable".into())
                                 .map_err(|e| match e {})
@@ -169,10 +169,15 @@ pub async fn handle_request(
                 |message| {
                     Response::builder()
                         .status(StatusCode::OK)
-                        // .header("Content-Type", "image/webp")
-                        .header("Content-Type", "image/jpeg")
+                        .header(
+                            "Content-Type",
+                            match message.0 {
+                                Ext::Jpeg => "image/jpeg",
+                                Ext::Webp => "image/webp",
+                            },
+                        )
                         .header("Access-Control-Allow-Origin", "*")
-                        .body(Full::new(message).map_err(|e| match e {}).boxed())
+                        .body(Full::new(message.1).map_err(|e| match e {}).boxed())
                 },
             )
         }
