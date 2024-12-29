@@ -1,7 +1,6 @@
 mod bbox;
 mod gdal_reader;
 mod request_handler;
-mod size;
 mod xyz;
 
 use anyhow::Result;

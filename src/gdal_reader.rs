@@ -1,4 +1,4 @@
-use crate::{bbox::BBox, size::Size};
+use crate::bbox::BBox;
 use gdal::{errors::GdalError, raster::ResampleAlg, Dataset};
 use thiserror::Error;
 
@@ -18,7 +18,7 @@ pub enum ReadError {
 pub fn read_rgba_from_gdal(
     dataset: &Dataset,
     result_bbox: BBox<f64>,
-    size: Size<f64>,
+    size: (usize, usize),
     background: Background,
 ) -> Result<(bool, Vec<u8>), ReadError> {
     let input_count = dataset.raster_count();
@@ -47,11 +47,7 @@ pub fn read_rgba_from_gdal(
     let source_width = pixel_max_x - pixel_min_x;
     let source_height = pixel_max_y - pixel_min_y;
 
-    let w_scaled = size.width as usize;
-
-    let h_scaled = size.height as usize;
-
-    let band_size = w_scaled * h_scaled;
+    let band_size = size.0 * size.1;
 
     // TODO consider mask
 
@@ -74,29 +70,31 @@ pub fn read_rgba_from_gdal(
     let adj_source_height =
         ((window_y + source_height).min(raster_height as isize) - adj_window_y).max(0) as usize;
 
-    let ww = (w_scaled as f64 * (adj_source_width as f64 / source_width as f64)) as usize;
+    let ww = (size.0 as f64 * (adj_source_width as f64 / source_width as f64)) as usize;
 
-    let hh = (h_scaled as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
+    let hh = (size.1 as f64 * (adj_source_height as f64 / source_height as f64)) as usize;
 
     let window = (adj_window_x, adj_window_y);
 
     let window_size = (adj_source_width, adj_source_height);
 
-    let size = (ww, hh);
-
-    let off_y = if window_y == adj_window_y {
-        0
-    } else {
-        h_scaled - hh
-    };
+    let desired_size = (ww, hh);
 
     let off_x = if window_x == adj_window_x {
         0
+    } else if pixel_min_x <= 0 && pixel_max_x >= raster_width as isize {
+        (0 as f64 - size.0 as f64 * window_x as f64 / source_width as f64) as usize
     } else {
-        w_scaled - ww
+        size.0 - ww
     };
 
-    println!("{off_y} = {h_scaled} - {hh}");
+    let off_y = if window_y == adj_window_y {
+        0
+    } else if pixel_min_y <= 0 && pixel_max_y >= raster_height as isize {
+        (0 as f64 - size.1 as f64 * window_y as f64 / source_height as f64) as usize
+    } else {
+        size.1 - hh
+    };
 
     let mut source_band = vec![0u8; hh * ww];
 
@@ -123,7 +121,7 @@ pub fn read_rgba_from_gdal(
             dataset.rasterband(4)?.read_into_slice::<u8>(
                 window,
                 window_size,
-                size,
+                desired_size,
                 &mut source_band,
                 Some(ResampleAlg::NearestNeighbour),
             )?;
@@ -146,7 +144,7 @@ pub fn read_rgba_from_gdal(
         mask_band.read_into_slice::<u8>(
             window,
             window_size,
-            size,
+            desired_size,
             &mut mask_data,
             Some(ResampleAlg::NearestNeighbour),
         )?;
@@ -154,18 +152,18 @@ pub fn read_rgba_from_gdal(
         band.read_into_slice::<u8>(
             window,
             window_size,
-            size,
+            desired_size,
             &mut source_band,
             Some(ResampleAlg::NearestNeighbour),
         )?;
 
-        for y in 0..w_scaled.min(hh) {
-            for x in 0..h_scaled.min(ww) {
+        for y in 0..size.0.min(hh) {
+            for x in 0..size.1.min(ww) {
                 let data_index = y * ww + x;
 
                 if mask_data[data_index] != 0 {
                     let result_index =
-                        ((y + off_y) * w_scaled + (x + off_x)) * result_count + band_index;
+                        ((y + off_y) * size.0 + (x + off_x)) * result_count + band_index;
 
                     result_data[result_index] = alpha_band.as_ref().map_or_else(
                         || source_band[data_index],

@@ -1,5 +1,4 @@
 use crate::gdal_reader::{read_rgba_from_gdal, Background, ReadError};
-use crate::size::Size;
 use crate::xyz::tile_bounds_to_epsg3857;
 use gdal::Dataset;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
@@ -43,9 +42,9 @@ enum FooErr {
     JoinError(#[from] JoinError),
     #[error("not acceptable")]
     NotAcceptable,
-    #[error("gdal read error")]
+    #[error("gdal read error: {0}")]
     GdalReadError(#[from] ReadError),
-    #[error("image encoding error")]
+    #[error("image encoding error: {0}")]
     ImageEncodingError(#[from] ImageError),
 }
 
@@ -108,10 +107,7 @@ pub async fn handle_request(
                         read_rgba_from_gdal(
                             ds,
                             bbox,
-                            Size {
-                                width: 256f64,
-                                height: 256f64,
-                            },
+                            (256, 256),
                             Background::Rgb(255, 0, 0), // TODO or alpha by query or image format alpha support
                         )?
                     };
@@ -142,7 +138,7 @@ pub async fn handle_request(
 
                             Ok(Bytes::from(img_data))
                         }
-                        None => return Err(FooErr::NotAcceptable),
+                        None => Err(FooErr::NotAcceptable),
                     }
                 })
             })
