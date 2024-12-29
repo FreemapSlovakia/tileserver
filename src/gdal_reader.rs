@@ -1,10 +1,35 @@
+use std::borrow::Cow;
+
 use crate::bbox::BBox;
 use gdal::{errors::GdalError, raster::ResampleAlg, Dataset};
+use itertools::Itertools;
 use thiserror::Error;
 
 pub enum Background {
     Alpha,
     Rgb(u8, u8, u8),
+}
+
+pub struct BackgroundError();
+
+impl TryFrom<Cow<'_, str>> for Background {
+    type Error = BackgroundError;
+
+    fn try_from(value: Cow<'_, str>) -> Result<Self, Self::Error> {
+        if value.len() != 6 {
+            return Err(BackgroundError());
+        }
+
+        value
+            .chars()
+            .chunks(2)
+            .into_iter()
+            .map(|chunk| chunk.collect::<String>())
+            .map(|c| u8::from_str_radix(&c, 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| BackgroundError())
+            .map(|rgb| Self::Rgb(rgb[0], rgb[1], rgb[2]))
+    }
 }
 
 #[derive(Error, Debug)]
@@ -83,7 +108,7 @@ pub fn read_rgba_from_gdal(
     let off_x = if window_x == adj_window_x {
         0
     } else if pixel_min_x <= 0 && pixel_max_x >= raster_width as isize {
-        (0 as f64 - size.0 as f64 * window_x as f64 / source_width as f64) as usize
+        (0.0 as f64 - size.0 as f64 * window_x as f64 / source_width as f64) as usize
     } else {
         size.0 - ww
     };
@@ -91,7 +116,7 @@ pub fn read_rgba_from_gdal(
     let off_y = if window_y == adj_window_y {
         0
     } else if pixel_min_y <= 0 && pixel_max_y >= raster_height as isize {
-        (0 as f64 - size.1 as f64 * window_y as f64 / source_height as f64) as usize
+        (0.0 - size.1 as f64 * window_y as f64 / source_height as f64) as usize
     } else {
         size.1 - hh
     };
@@ -170,11 +195,11 @@ pub fn read_rgba_from_gdal(
                         |alpha_band| {
                             let alpha = u16::from(alpha_band[data_index]);
 
-                            ((source_band[data_index] as u16 * alpha
-                                + result_data[result_index] as u16 * (255 - alpha))
+                            ((u16::from(source_band[data_index]) * alpha
+                                + u16::from(result_data[result_index]) * (255 - alpha))
                                 / 255) as u8
                         },
-                    )
+                    );
                 }
             }
         }
@@ -183,7 +208,7 @@ pub fn read_rgba_from_gdal(
     // premultiply
     if result_count == 4 {
         for i in (0..result_data.len()).step_by(3) {
-            let alpha = result_data[i + 3] as f32 / 255.0;
+            let alpha = f32::from(result_data[i + 3]) / 255.0;
 
             let r = (f32::from(result_data[i + 0]) * alpha) as u8;
             let g = (f32::from(result_data[i + 1]) * alpha) as u8;

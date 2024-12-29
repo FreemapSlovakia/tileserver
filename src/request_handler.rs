@@ -8,23 +8,25 @@ use hyper::{
 };
 use image::ImageError;
 use image::{codecs::jpeg::JpegEncoder, ImageEncoder};
+use std::convert::Infallible;
 use std::path::Path;
 use std::{cell::RefCell, io::Cursor, sync::Arc};
-use thiserror::Error;
 use tokio::runtime::Runtime;
 use tokio::task::JoinError;
+use url::Url;
+use webp::WebPEncodingError;
 
 thread_local! {
     static THREAD_LOCAL_DATA: RefCell<Option<Dataset>> = const {RefCell::new(None)};
 }
 
-enum Ext {
+enum ImageType {
     Jpeg,
     // Png,
     Webp,
 }
 
-impl TryFrom<&str> for Ext {
+impl TryFrom<&str> for ImageType {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -36,45 +38,79 @@ impl TryFrom<&str> for Ext {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 enum ProcessingError {
     #[error("join error")]
     JoinError(#[from] JoinError),
+
     #[error("not acceptable")]
-    NotAcceptable,
+    HttpError(StatusCode, Option<&'static str>),
+
     #[error("gdal read error: {0}")]
     GdalReadError(#[from] ReadError),
+
     #[error("image encoding error: {0}")]
     ImageEncodingError(#[from] ImageError),
+
+    #[error("image encoding error")]
+    WebPEncodingError(WebPEncodingError),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum BodyError {
+    #[error("infallible")]
+    Infillable(Infallible),
 }
 
 pub async fn handle_request(
     pool: Arc<Runtime>,
     req: Request<Incoming>,
     raster_path: &'static Path,
-) -> Result<Response<BoxBody<Bytes, std::io::Error>>, hyper::http::Error> {
+) -> Result<Response<BoxBody<Bytes, BodyError>>, hyper::http::Error> {
     if req.method() != Method::GET {
-        return Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(
-                Full::new("Method not allowed".into())
-                    .map_err(|e| match e {})
-                    .boxed(),
-            );
+        return http_error(StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    let path = req.uri().path();
+    let url = Url::parse(&req.uri().to_string()).unwrap();
+
+    let path = url.path();
+
+    let mut size: u32 = 256;
+
+    let mut quality = 75.0;
+
+    let mut background = Background::Alpha;
+
+    for pair in url.query_pairs() {
+        match pair.0.as_ref() {
+            "background" | "bg" => {
+                background = match pair.1.try_into() {
+                    Ok(bg) => bg,
+                    Err(_) => return http_error(StatusCode::BAD_REQUEST),
+                }
+            }
+            "quality" | "q" => {
+                quality = match pair.1.parse::<f32>() {
+                    Ok(quality) => quality,
+                    Err(_) => return http_error(StatusCode::BAD_REQUEST),
+                }
+            }
+            "size" => {
+                size = match pair.1.parse() {
+                    Ok(size) => size,
+                    Err(_) => return http_error(StatusCode::BAD_REQUEST),
+                }
+            }
+            _ => {}
+        }
+    }
 
     let parts: Vec<_> = path.splitn(2, '.').collect();
 
-    let ext: Result<Option<Ext>, _> = parts.get(1).map(|&x| x.try_into()).transpose();
+    let ext: Result<Option<ImageType>, _> = parts.get(1).map(|&x| x.try_into()).transpose();
 
     let Ok(ext) = ext else {
-        return Response::builder().status(StatusCode::NOT_FOUND).body(
-            Full::new("Not found".into())
-                .map_err(|e| match e {})
-                .boxed(),
-        );
+        return http_error(StatusCode::NOT_FOUND);
     };
 
     let parts: Vec<_> = parts
@@ -93,7 +129,7 @@ pub async fn handle_request(
         parts.get(2).copied().flatten(),
     ) {
         (Some(zoom), Some(x), Some(y)) if parts.len() == 3 => {
-            let bbox = tile_bounds_to_epsg3857(x, y, zoom, 256);
+            let bbox = tile_bounds_to_epsg3857(x, y, zoom, size);
 
             pool.spawn_blocking(move || {
                 THREAD_LOCAL_DATA.with(|data| {
@@ -104,41 +140,34 @@ pub async fn handle_request(
                             Dataset::open(raster_path).expect("error opening dataset")
                         });
 
-                        read_rgba_from_gdal(
-                            ds,
-                            bbox,
-                            (256, 256),
-                            Background::Rgb(255, 0, 0), // TODO or alpha by query or image format alpha support
-                        )?
+                        read_rgba_from_gdal(ds, bbox, (size as usize, size as usize), background)?
                     };
 
                     match ext {
-                        Some(Ext::Webp) => {
+                        Some(ImageType::Webp) => {
                             let encoder = if has_alpha {
-                                webp::Encoder::from_rgba(&raster, 256, 256)
+                                webp::Encoder::from_rgba(&raster, size, size)
                             } else {
-                                webp::Encoder::from_rgb(&raster, 256, 256)
+                                webp::Encoder::from_rgb(&raster, size, size)
                             };
 
-                            let webp = encoder.encode_lossless(); // TODO configurable quality
+                            let webp = encoder
+                                .encode_simple(quality == 100.0, quality)
+                                .map_err(ProcessingError::WebPEncodingError)?;
 
-                            Ok((Ext::Webp, Bytes::from(Vec::from(&*webp))))
+                            Ok((ImageType::Webp, Bytes::from(Vec::from(&*webp))))
                         }
-                        Some(Ext::Jpeg) => {
+                        Some(ImageType::Jpeg) => {
                             let mut img_data = Vec::<u8>::new();
 
                             let cursor = Cursor::new(&mut img_data);
 
-                            JpegEncoder::new_with_quality(cursor, 95).write_image(
-                                &raster,
-                                256,
-                                256,
-                                image::ExtendedColorType::Rgb8,
-                            )?;
+                            JpegEncoder::new_with_quality(cursor, (quality * 2.55).round() as u8)
+                                .write_image(&raster, size, size, image::ExtendedColorType::Rgb8)?;
 
-                            Ok((Ext::Jpeg, Bytes::from(img_data)))
+                            Ok((ImageType::Jpeg, Bytes::from(img_data)))
                         }
-                        None => Err(ProcessingError::NotAcceptable),
+                        None => Err(ProcessingError::HttpError(StatusCode::NOT_FOUND, None)),
                     }
                 })
             })
@@ -146,24 +175,13 @@ pub async fn handle_request(
             .map_err(ProcessingError::JoinError)
             .and_then(|inner_result| inner_result)
             .map_or_else(
-                |e| match e {
-                    ProcessingError::NotAcceptable => {
-                        Response::builder().status(StatusCode::NOT_ACCEPTABLE).body(
-                            Full::new("Not acceptable".into())
-                                .map_err(|e| match e {})
-                                .boxed(),
-                        )
-                    }
-                    _ => {
+                |e| {
+                    if let ProcessingError::HttpError(sc, message) = e {
+                        http_error_msg(sc, message.unwrap_or_else(|| sc.as_str()))
+                    } else {
                         eprintln!("Error: {e}");
 
-                        Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(
-                                Full::new("Internal Server Error".into())
-                                    .map_err(|e| match e {})
-                                    .boxed(),
-                            )
+                        http_error(StatusCode::INTERNAL_SERVER_ERROR)
                     }
                 },
                 |message| {
@@ -172,8 +190,8 @@ pub async fn handle_request(
                         .header(
                             "Content-Type",
                             match message.0 {
-                                Ext::Jpeg => "image/jpeg",
-                                Ext::Webp => "image/webp",
+                                ImageType::Jpeg => "image/jpeg",
+                                ImageType::Webp => "image/webp",
                             },
                         )
                         .header("Access-Control-Allow-Origin", "*")
@@ -181,10 +199,21 @@ pub async fn handle_request(
                 },
             )
         }
-        _ => Response::builder().status(StatusCode::NOT_FOUND).body(
-            Full::new("Not found".into())
-                .map_err(|e| match e {})
-                .boxed(),
-        ),
+        _ => http_error(StatusCode::NOT_FOUND),
     }
+}
+
+fn http_error(sc: StatusCode) -> Result<Response<BoxBody<Bytes, BodyError>>, hyper::http::Error> {
+    http_error_msg(sc, sc.as_str())
+}
+
+fn http_error_msg(
+    sc: StatusCode,
+    message: &str,
+) -> Result<Response<BoxBody<Bytes, BodyError>>, hyper::http::Error> {
+    Response::builder().status(sc).body(
+        Full::new(Bytes::from(message.to_owned()))
+            .map_err(BodyError::Infillable)
+            .boxed(),
+    )
 }
