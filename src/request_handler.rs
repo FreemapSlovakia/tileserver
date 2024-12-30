@@ -71,7 +71,7 @@ pub async fn handle_request(
         return http_error(StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    let url = Url::parse(&req.uri().to_string()).unwrap();
+    let url = Url::parse(&format!("http://localhost{}", req.uri().to_string())).unwrap();
 
     let path = url.path();
 
